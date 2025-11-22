@@ -43,8 +43,8 @@ from alpaca.data.timeframe import TimeFrame
 import pandas as pd
 from datetime import datetime, timedelta
 
-ALPACA_API_KEY = "PKKWT34KQNGOF2DMAXHG"
-ALPACA_SECRET_KEY = "GIyGtBGrFgRQw7e7CKCcHZTfBOT5JjBesUsxFzRf"
+ALPACA_API_KEY = "[REDACTED]"
+ALPACA_SECRET_KEY = "[REDACTED]"
 client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
 end = datetime.now() - timedelta(days=30)
