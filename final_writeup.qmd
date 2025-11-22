@@ -1,0 +1,1110 @@
+---
+title: "Final"
+format: html
+editor: visual
+---
+
+## Introduction
+
+Throughout this code, we are using two separate analysis tools, one that was introduced in class, the ARIMA model, and one that we have each used on our own free time, the Long Short Term Memory (LSTM) model. Between these two, each will be trained on the same train data and analyzed using the same testing data. In the end we will utilize a Deep-Q Network (DQN) to test the trading capabilities of each model, using a swing trading algorithm. Such that, if the predicted price trend is positive, then the model will buy long and sell when the trend starts to go negative, and if there is a negative trend then the model will sell short and then buy long once the trend starts going positive again.
+
+The differences between the ARIMA model and the LSTM model are primarily the inputs and the ways that each model operates. The ARIMA model uses a PDQ setup, where p: the number of auto-regressive terms, d: the number of differencing, q: the number of moving averages within the model. The ARIMA model is fantastic for capturing long term seasonal values and trends, but we will see how it works with short term high frequency data as well. While in contrast, the LSTM model is very strong for high frequency short term predictions, as the math behind the LSTM uses a rolling window function that observes the total data, but specifically viewing at a set window in the data as well. This allows for a true capture of high accuracy when using data that is extremely similar and moves at small intervals.
+
+## Abstract
+
+We first begin by coding the ARIMA model, which ends us giving us a random walk method after using the auto.arima function to train the ARIMA. The random walk will give us the current value by adding the error term of the current value to the previous value, in our case this allows for very minuscule changes throughout the ARIMA model. We train the LSTM model the using the same data as the ARIMA model, and we utilize a rolling window function for each of 180 datapoints, which is equivalent to 180 minutes (3 hours). We are using minute level bars for stocks of NVDA and META which were both pulled using an Alpaca API. These models are then each trained on the same test data and their predictions are analyzed and then fed into a DQN to view the trading capabilities of each model. The LSTM model performed significantly better than the ARIMA model, due to the ARIMA model making extremely minuscule predictions using the random walk method. One assumption is that the ARIMA model settled on the average value of the stocks during our training period and then hovered around that mean during our testing period. Therefore, not allowing for any true trends for the DQN model to trade based off of.
+
+## Installing Python packages into R
+
+We first need to download the packages that will be utilized in the Python chunks throughout this code, as they are all necessary for data parsing, model training, data pulls, and the DQN creation.
+
+```{r}
+if (!requireNamespace("reticulate", quietly = TRUE)) {
+  install.packages("reticulate")
+}
+
+reticulate::py_install(
+  packages = c("numpy", "pandas", "scikit-learn", "alpaca_trade_api", "datetime", "tensorflow", "matplotlib"),
+  envname  = "r-reticulate",
+  method   = "auto"
+)
+```
+
+## Pulling Trades for Nvidia using personal Alpaca-API:
+
+Here an Alpaca API is utilized for pulling the training data, we used 30 days prior to today's date to call the last date of the training set, and then set the start date 3 months in advance. Allowing for 3 months of training data total. The data was pulled at the minute bar level for Nvidia, and the prices were used from the closing price of that minute bar.
+
+```{python}
+# NVDA
+import alpaca_trade_api as tradeapi
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+import pandas as pd
+from datetime import datetime, timedelta
+
+ALPACA_API_KEY = "PKKWT34KQNGOF2DMAXHG"
+ALPACA_SECRET_KEY = "GIyGtBGrFgRQw7e7CKCcHZTfBOT5JjBesUsxFzRf"
+client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+
+end = datetime.now() - timedelta(days=30)
+start = end - timedelta(days=120)
+
+symbol = "NVDA"
+timeframe = TimeFrame.Minute
+
+
+print(f"Fetching 1-minute bars for {symbol} from {start.date()} to {end.date()}...")
+
+try:
+    request = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end
+    )
+    bars = client.get_stock_bars(request).df
+
+    if not bars.empty:
+        bars.to_csv(f"{symbol}_1min_90days.csv")
+        print(f"Saved to {symbol}_1min_90days.csv")
+    else:
+        print(f"No data returned for {symbol}")
+
+except Exception as e:
+    print(f"Error fetching data: {e}")
+    
+
+```
+
+## Pulling Trades for Meta using personal Alpaca-API:
+
+Here an Alpaca API is utilized for pulling the training data, we used 30 days prior to today's date to call the last date of the training set, and then set the start date 3 months in advance. Allowing for 3 months of training data total. The data was pulled at the minute bar level for Meta, and the prices were used from the closing price of that minute bar.
+
+```{python}
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+import pandas as pd
+from datetime import datetime, timedelta
+
+ALPACA_API_KEY = "PKKWT34KQNGOF2DMAXHG"
+ALPACA_SECRET_KEY = "GIyGtBGrFgRQw7e7CKCcHZTfBOT5JjBesUsxFzRf"
+client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+
+end = datetime.now() - timedelta(days=30)
+start = end - timedelta(days=120)
+
+symbol = "META"
+timeframe = TimeFrame.Minute
+
+
+print(f"Fetching 1-minute bars for {symbol} from {start.date()} to {end.date()}...")
+
+try:
+    request = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end
+    )
+    bars = client.get_stock_bars(request).df
+
+    if not bars.empty:
+        bars.to_csv(f"{symbol}_1min_90days.csv")
+        print(f"Saved to {symbol}_1min_90days.csv")
+    else:
+        print(f"No data returned for {symbol}")
+
+except Exception as e:
+    print(f"Error fetching data: {e}")
+```
+
+## Training NVDA LSTM:
+
+Here the NVDA LSTM model is trained, first we scale the data using the typical min max scaler equation:
+
+$$
+x' = \frac{x - \min(x)}{\max(x) - \min(x)}
+$$
+
+After this, we were able to create the dataset by creating a function called *create_dataset* which we then call based on the *scaled_data* of the prices transformation. We then split the training data into an 80/20 test/split and created the LSTM layers, which we used 2 layers each of 50 units, then one output layer using the tanh function which is as follows:
+
+$$
+\tanh(x) = \frac{e^{x} - e^{-x}}{e^{x} + e^{-x}} 
+$$
+
+Together, the full math will look such as this for the LSTM model, then the output layer, and then the Adam optimizer function updates:
+
+LSTM with two 50 unit layers:
+
+$$
+\begin{aligned}\text{Let }h_t^{(0)} &= x_t.\\\text{For }l &= 1,2:\\\quad i_t^{(l)} &= \sigma\bigl(W_i^{(l)}[\,h_t^{(l-1)},\,h_{t-1}^{(l)}]+b_i^{(l)}\bigr),\\\quad f_t^{(l)} &= \sigma\bigl(W_f^{(l)}[\,h_t^{(l-1)},\,h_{t-1}^{(l)}]+b_f^{(l)}\bigr),\\\quad o_t^{(l)} &= \sigma\bigl(W_o^{(l)}[\,h_t^{(l-1)},\,h_{t-1}^{(l)}]+b_o^{(l)}\bigr),\\\quad \widetilde{C}_t^{(l)} &= \tanh\bigl(W_c^{(l)}[\,h_t^{(l-1)},\,h_{t-1}^{(l)}]+b_c^{(l)}\bigr),\\\quad C_t^{(l)} &= f_t^{(l)} \odot C_{t-1}^{(l)} \;+\; i_t^{(l)} \odot \widetilde{C}_t^{(l)},\\\quad h_t^{(l)} &= o_t^{(l)} \odot \tanh\bigl(C_t^{(l)}\bigr).\end{aligned}
+$$
+
+Output layer with tanh function for 1 output value:
+
+$$
+y_t = \tanh\bigl(W_y\,h_t^{(2)} + b_y\bigr),whereW_y\in\mathbb{R}^{1\times 50} and b_y\in\mathbb{R}.
+$$
+
+Then the Adam optimizer for updating equations:
+
+$$
+\begin{aligned}m_t &= \beta_1\,m_{t-1} \;+\;(1-\beta_1)\,g_t,\\v_t &= \beta_2\,v_{t-1} \;+\;(1-\beta_2)\,g_t^2,\\\hat{m}_t &= \frac{m_t}{1 - \beta_1^t},\quad\hat{v}_t = \frac{v_t}{1 - \beta_2^t},\\\theta_t &= \theta_{t-1} \;-\;\alpha \;\frac{\hat{m}_t}{\sqrt{\hat{v}_t}\;+\;\epsilon},\end{aligned}
+$$
+
+The model is then saved in a .h5 format for easy access and loading for future use. The code and explanation is the same as follows for META, with the same math, test/train splits and same LSTM inputs.
+
+```{python}
+# NVDA
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+
+
+csv_path = "NVDA_1min_90days.csv"
+df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+prices = df['close'].values.reshape(-1, 1)
+print(f"Loaded {len(prices)} 1-minute price points.")
+
+
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(prices)
+
+
+def create_dataset(dataset, window_size=10):
+    X, y = [], []
+    for i in range(window_size, len(dataset)):
+        X.append(dataset[i-window_size:i, 0])
+        y.append(dataset[i, 0])
+    return np.array(X), np.array(y)
+
+
+window_size = 180 # 3 hour window
+X, y = create_dataset(scaled_data, window_size)
+X = X.reshape((X.shape[0], X.shape[1], 1))
+print(f"Created {X.shape[0]} samples with window size {window_size}.")
+
+
+train_size = int(len(X) * 0.8)
+X_train, y_train = X[:train_size], y[:train_size]
+X_test, y_test   = X[train_size:], y[train_size:]
+
+
+model = Sequential()
+model.add(LSTM(50, return_sequences=True, input_shape=(window_size, 1)))
+model.add(Dropout(0.2))
+model.add(LSTM(50))
+model.add(Dropout(0.2))
+model.add(Dense(1))
+
+model.compile(optimizer='adam', loss='mean_squared_error')
+
+
+model.fit(X_train, y_train, epochs=50, batch_size=32, validation_data=(X_test, y_test))
+
+
+loss = model.evaluate(X_test, y_test, verbose=0)
+print(f"Test loss: {loss:.4f}")
+model.save("NVDA_lstm_06_03.h5")
+```
+
+## Training META LSTM:
+
+```{python}
+# META
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+
+
+csv_path = "META_1min_90days.csv"
+df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+prices = df['close'].values.reshape(-1, 1)
+print(f"Loaded {len(prices)} 1-minute price points.")
+
+
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(prices)
+
+
+def create_dataset(dataset, window_size=10):
+    X, y = [], []
+    for i in range(window_size, len(dataset)):
+        X.append(dataset[i-window_size:i, 0])
+        y.append(dataset[i, 0])
+    return np.array(X), np.array(y)
+
+
+window_size = 180 # 3 hour window
+X, y = create_dataset(scaled_data, window_size)
+X = X.reshape((X.shape[0], X.shape[1], 1))
+print(f"Created {X.shape[0]} samples with window size {window_size}.")
+
+
+train_size = int(len(X) * 0.8)
+X_train, y_train = X[:train_size], y[:train_size]
+X_test, y_test   = X[train_size:], y[train_size:]
+
+
+model = Sequential()
+model.add(LSTM(50, return_sequences=True, input_shape=(window_size, 1)))
+model.add(Dropout(0.2))
+model.add(LSTM(50))
+model.add(Dropout(0.2))
+model.add(Dense(1))
+model.compile(optimizer='adam', loss='mean_squared_error')
+
+
+model.fit(X_train, y_train, epochs=50, batch_size=32, validation_data=(X_test, y_test))
+
+
+loss = model.evaluate(X_test, y_test, verbose=0)
+print(f"Test loss: {loss:.4f}")
+model.save("META_lstm_06_03.h5")
+```
+
+## Data for ARIMA:
+
+The ARIMA data is now read in, using the 3 month period for the training data, with dataframes titled "NVDA_trades" and "META_trades." Then with the one month testing data titled "NVDA_trades_test" and "META_trades_test."
+
+```{r}
+#| echo: false
+#| message: false
+rm(list = ls())
+
+library(tsibble)
+library(dplyr)
+library(fredr)
+library(tidyverse)
+library(fpp3)
+library(scales)
+library(GGally)
+library(leaps)
+library(forecast)
+library(data.table)
+
+NVDA_trades <- read.csv("NVDA_1min_90days_0105_0505.csv")
+META_trades <- read.csv("META_1min_90days_0105_0505.csv")
+
+NVDA_trades_test <- read.csv("NVDA_1min_0505_0604_test.csv")
+META_trades_test <- read.csv("META_1min_0505_0604_test.csv")
+```
+
+## Splitting data and fitting auto.arima for NVDA:
+
+The data is first ensured that the timestamps are read into the ARIMA model as actual time points, by using the 'as.POSIXct' and 'as.Date' on columns timestamp. We ensure the data is just for the ranges we specified when pulling from Alpaca by filtering. Then we do the same calls to the test set as well for NVDA. From there we specify which data we want to use for the test and train data, such as the closing prices of the minute bars in column titled 'close'. These are then created into their own dataframes called "train_NVDA_close" and "test_NVDA_close." Next we let the *auto.arima* function choose which ARIMA model is best, in which we end up with the random walk ARIMA model which is (0,1,0) with the following math:
+
+$$
+x_t = x_{t-1} + \varepsilon_t
+$$
+
+The data is then formatted to the long format, for plotting purposes and we plot the ARIMA predicted prices vs. the actual test dataset. As we can observe, the values are not all that fantastic and some changes needed to be made to the model, which we do not cover, to fully optimize the ARIMA's potential.
+
+```{r}
+#| echo: false
+
+NVDA_trades <- NVDA_trades |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+
+train_df_NVDA <- NVDA_trades |>
+  filter(date >= as.Date("2025-01-05") & date <= as.Date("2025-05-05"))
+
+
+NVDA_trades_test <- NVDA_trades_test |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+test_df_NVDA  <- NVDA_trades_test |>
+  filter(date >= as.Date("2025-05-05") & date <= as.Date("2025-06-04"))
+
+
+train_NVDA_close <- train_df_NVDA$close
+test_NVDA_close  <- test_df_NVDA$close
+
+
+ts_NVDA_train <- ts(train_NVDA_close, frequency = 1)
+
+
+fit_NVDA <- auto.arima(ts_NVDA_train)
+
+h_NVDA <- length(test_NVDA_close)
+fc_NVDA <- forecast(fit_NVDA, h = h_NVDA)
+
+
+results_NVDA <- data.frame(
+  timestamp       = test_df_NVDA$timestamp,
+  forecast_close  = as.numeric(fc_NVDA$mean),   
+  actual_close    = test_NVDA_close
+)
+
+print(results_NVDA)
+
+
+results_NVDA_long <- results_NVDA |>
+  pivot_longer(
+    cols      = c(actual_close, forecast_close),
+    names_to  = "series",
+    values_to = "price"
+  )
+
+ggplot(results_NVDA_long, aes(x = timestamp, y = price, color = series)) +
+  geom_line() +
+  labs(
+    title = "NVDA: Actual vs. Forecasted Prices from 2025-05-05 to 2025-06-04",
+    x     = "Timestamp",
+    y     = "Price",
+    color = ""
+  ) +
+  theme_minimal()
+```
+
+## Splitting data and fitting auto.arima for META:
+
+The data is first ensured that the timestamps are read into the ARIMA model as actual time points, by using the 'as.POSIXct' and 'as.Date' on columns timestamp. We ensure the data is just for the ranges we specified when pulling from Alpaca by filtering. Then we do the same calls to the test set as well for META. From there we specify which data we want to use for the test and train data, such as the closing prices of the minute bars in column titled 'close'. These are then created into their own dataframes called "train_META_close" and "test_META_close." Next we let the *auto.arima* function choose which ARIMA model is best, in which we end up with the random walk ARIMA model which is (0,1,0) with the following math:
+
+$$
+x_t = x_{t-1} + \varepsilon_t
+$$
+
+The data is then formatted to the long format, for plotting purposes and we plot the ARIMA predicted prices vs. the actual test dataset. As we can observe, the values are not all that fantastic and some changes needed to be made to the model, which we do not cover, to fully optimize the ARIMA's potential.
+
+```{r}
+
+#| echo: false
+
+META_trades <- META_trades |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+
+train_df_META <- META_trades |>
+  filter(date >= as.Date("2025-01-05") & date <= as.Date("2025-05-05"))
+
+
+META_trades_test <- META_trades_test |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+test_df_META  <- META_trades_test |>
+  filter(date >= as.Date("2025-05-05") & date <= as.Date("2025-06-04"))
+
+
+train_META_close <- train_df_META$close
+test_META_close  <- test_df_META$close
+
+
+ts_META_train <- ts(train_META_close, frequency = 1)
+
+
+fit_META <- auto.arima(ts_META_train)
+
+h_META <- length(test_META_close)
+fc_META <- forecast(fit_META, h = h_META)
+
+
+results_META <- data.frame(
+  timestamp       = test_df_META$timestamp,
+  forecast_close  = as.numeric(fc_META$mean),   
+  actual_close    = test_META_close
+)
+
+print(results_META)
+
+
+results_META_long <- results_META |>
+  pivot_longer(
+    cols      = c(actual_close, forecast_close),
+    names_to  = "series",
+    values_to = "price"
+  )
+
+ggplot(results_META_long, aes(x = timestamp, y = price, color = series)) +
+  geom_line() +
+  labs(
+    title = "META: Actual vs. Forecasted Prices from 2025-05-05 to 2025-06-04",
+    x     = "Timestamp",
+    y     = "Price",
+    color = ""
+  ) +
+  theme_minimal()
+```
+
+## Utilizing rolling window ARIMA model for META:
+
+To try and copy the methodologies used behind the LSTM model and its success, a rolling window was implemented for the ARIMA model itself. Utilizing a 90 minute rolling window until the data no longer has values to insert into that rolling window. We expected the model to perform better, however, we ended up getting the same results of the model hovering around the average values and using the same random walk method to change the values at the 0.001 decimal place. Which is not extraordinarily useful for stock prediction methods. We created the visualizations based on block groups, i.e. the first block group of the test set is going to be the minutes 1-90, then the second block group is going to be 91-180. These graphs show drastic up and downs for the true values repeated roughly 100 fold times. The rolling window for META did not assist in a stronger prediction value but rather hovered near the average as previously described. This is one limitation of using an ARIMA model on data such as this, as it has no true deviation to base itself on and rather changes at a very small gradient level.
+
+```{r}
+
+#| echo: false
+
+META_trades <- META_trades |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+train_df_META <- META_trades |>
+  filter(date >= as.Date("2025-01-05") & date <= as.Date("2025-05-05"))
+
+META_trades_test <- META_trades_test |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+test_df_META <- META_trades_test |>
+  filter(date >= as.Date("2025-05-05") & date <= as.Date("2025-06-04"))
+
+
+train_META_close <- train_df_META$close   # numeric vector of length N_train
+test_META_close  <- test_df_META$close    # numeric vector of length N_test
+
+N_train_META <- length(train_META_close)
+N_test_META  <- length(test_META_close)
+
+train_META_close <- train_df_META$close
+test_META_close  <- test_df_META$close
+
+
+window_length <- 90
+
+
+
+if (N_train_META < window_length) {
+  stop("Training data has fewer than 90 observations; cannot form a 90‐bar window.")
+}
+window_90 <- tail(train_META_close, window_length)
+
+
+ts_window_90_META <- ts(window_90, frequency = 1)
+fit_90_META       <- auto.arima(ts_window_90_META)
+h_90_META         <- min(window_length, N_test_META)
+fc_90_META        <- forecast(fit_90_META, h = h_90_META)
+pred_90_META      <- as.numeric(fc_90_META$mean)
+act_90_META       <- test_META_close[1:h_90_META]
+
+
+df_one_shot_META <- tibble(
+  minute_index = seq_len(h_90_META),
+  predicted    = pred_90_META,
+  actual       = act_90_META
+)
+
+
+ggplot(df_one_shot_META, aes(x = minute_index)) +
+  geom_line(aes(y = actual,    color = "Actual")) +
+  geom_line(aes(y = predicted, color = "Predicted")) +
+  labs(
+    title = "One Shot ARIMA on Last 90 Bars -> Next 90 Bar Forecast",
+    subtitle = sprintf("Training window: bars %d through %d -> Forecast bars %d through %d",
+                       N_train_META - window_length + 1, N_train_META,
+                       N_train_META + 1, N_train_META + h_90_META),
+    x     = "Bar Number (1 = first of the 90 forecasted minutes)",
+    y     = "META Close Price",
+    color = ""
+  ) +
+  theme_minimal()
+
+
+all_prices_META <- c(train_META_close, test_META_close)
+N_total_META    <- length(all_prices_META)
+
+N_window  <- 90
+step_size <- 90 
+
+rolling_results_META <- tibble(
+  window_end_idx = integer(),
+  pred_block     = list(),
+  actual_block   = list()
+)
+
+
+for (end_i in seq(N_window, N_total_META - 1, by = step_size)) {
+  start_i    <- end_i - N_window + 1
+  train_block <- all_prices_META[start_i:end_i]
+  ts_block    <- ts(train_block, frequency = 1)
+  fit_block   <- auto.arima(ts_block)
+  n_remaining <- N_total_META - end_i
+  forecast_h  <- min(N_window, n_remaining)
+  fc_block     <- forecast(fit_block, h = forecast_h)
+  pred_block_i <- as.numeric(fc_block$mean)
+  actual_block_i <- all_prices_META[(end_i + 1):(end_i + forecast_h)]
+  rolling_results_META <- add_row(
+    rolling_results_META,
+    window_end_idx = end_i,
+    pred_block     = list(pred_block_i),
+    actual_block   = list(actual_block_i)
+  )
+}
+
+
+print(rolling_results_META)
+
+
+rolling_long_META <- rolling_results_META |>
+  mutate(block_id = row_number()) |>
+  select(block_id, pred_block, actual_block) |>
+  unnest_longer(pred_block, values_to = "predicted") |>
+  unnest_longer(actual_block, values_to = "actual") |>
+  group_by(block_id) |>
+  mutate(step_in_block = row_number()) |>
+  ungroup()
+
+
+to_plot_META <- rolling_long_META |>
+  filter(block_id <= 2) |>
+  pivot_longer(
+    cols      = c(actual, predicted),
+    names_to  = "series",
+    values_to = "price"
+  )
+
+ggplot(to_plot_META, aes(x = step_in_block, y = price, color = series)) +
+  geom_line() +
+  facet_wrap(~ block_id, nrow = 2, scales = "free_x") +
+  labs(
+    title = "Rolling 90 -> 90 ARIMA Forecast (Blocks 1 & 2)",
+    subtitle = "Each facet = one window of 90 bars -> forecast next 90 bars",
+    x        = "Minute Index (1 - 90 within block)",
+    y        = "META Price",
+    color    = ""
+  ) +
+  theme_minimal()
+```
+
+## ARIMA model that was used for META:
+
+```{r}
+#| echo: false
+summary(fit_90_META)
+```
+
+The ARIMA(0,1,0) model is given by:
+
+$$
+y_t = y_{t-1} + \varepsilon_t
+$$
+
+## Utilizing rolling window ARIMA model for NVDA:
+
+To try and copy the methodologies used behind the LSTM model and its success, a rolling window was implemented for the ARIMA model itself. Utilizing a 90 minute rolling window until the data no longer has values to insert into that rolling window. We expected the model to perform better, however, we ended up getting the same results of the model hovering around the average values and using the same random walk method to change the values at the 0.001 decimal place. Which is not extraordinarily useful for stock prediction methods. We created the visualizations based on block groups, i.e. the first block group of the test set is going to be the minutes 1-90, then the second block group is going to be 91-180. These graphs show drastic up and downs for the true values repeated roughly 100 fold times. The rolling window for NVDA did not assist in a stronger prediction value but rather hovered near the average as previously described. This is one limitation of using an ARIMA model on data such as this, as it has no true deviation to base itself on and rather changes at a very small gradient level. However, for NVDA in particular, the one shot ARIMA model did stay nearly directly in the middle of the test set and did surprisingly well capturing the average of the first 90 minutes of the test set.
+
+```{r}
+
+NVDA_trades <- NVDA_trades |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+
+train_df_NVDA <- NVDA_trades |>
+  filter(date >= as.Date("2025-01-05") & date <= as.Date("2025-05-05"))
+
+
+NVDA_trades_test <- NVDA_trades_test |>
+  mutate(
+    timestamp = as.POSIXct(timestamp),       
+    date      = as.Date(timestamp)           
+  )
+
+test_df_NVDA <- NVDA_trades_test |>
+  filter(date >= as.Date("2025-05-05") & date <= as.Date("2025-06-04"))
+
+
+train_NVDA_close <- train_df_NVDA$close   # numeric vector of length N_train
+test_NVDA_close  <- test_df_NVDA$close    # numeric vector of length N_test
+
+N_train_NVDA <- length(train_NVDA_close)
+N_test_NVDA  <- length(test_NVDA_close)
+
+train_NVDA_close <- train_df_NVDA$close
+test_NVDA_close  <- test_df_NVDA$close
+
+
+window_length <- 90
+
+
+
+if (N_train_NVDA < window_length) {
+  stop("Training data has fewer than 90 observations; cannot form a 90 bar window.")
+}
+window_90 <- tail(train_NVDA_close, window_length)
+
+
+ts_window_90_NVDA <- ts(window_90, frequency = 1)
+fit_90_NVDA       <- auto.arima(ts_window_90_NVDA)
+h_90_NVDA         <- min(window_length, N_test_NVDA)
+fc_90_NVDA        <- forecast(fit_90_NVDA, h = h_90_NVDA)
+pred_90_NVDA      <- as.numeric(fc_90_NVDA$mean)
+act_90_NVDA       <- test_NVDA_close[1:h_90_NVDA]
+
+
+df_one_shot_NVDA <- tibble(
+  minute_index = seq_len(h_90_NVDA),
+  predicted    = pred_90_NVDA,
+  actual       = act_90_NVDA
+)
+
+
+ggplot(df_one_shot_NVDA, aes(x = minute_index)) +
+  geom_line(aes(y = actual,    color = "Actual")) +
+  geom_line(aes(y = predicted, color = "Predicted")) +
+  labs(
+    title = "One Shot ARIMA on Last 90 Bars -> Next 90 Bar Forecast",
+    subtitle = sprintf("Training window: bars %d through %d -> Forecast bars %d through %d",
+                       N_train_NVDA - window_length + 1, N_train_NVDA,
+                       N_train_NVDA + 1, N_train_NVDA + h_90_NVDA),
+    x     = "Bar Number (1 = first of the 90 forecasted minutes)",
+    y     = "NVDA Close Price",
+    color = ""
+  ) +
+  theme_minimal()
+
+
+all_prices_NVDA <- c(train_NVDA_close, test_NVDA_close)
+N_total_NVDA    <- length(all_prices_NVDA)
+
+N_window  <- 90
+step_size <- 90 
+
+rolling_results_NVDA <- tibble(
+  window_end_idx = integer(),
+  pred_block     = list(),
+  actual_block   = list()
+)
+
+
+for (end_i in seq(N_window, N_total_NVDA - 1, by = step_size)) {
+  start_i    <- end_i - N_window + 1
+  train_block <- all_prices_NVDA[start_i:end_i]
+  ts_block    <- ts(train_block, frequency = 1)
+  fit_block   <- auto.arima(ts_block)
+  n_remaining <- N_total_NVDA - end_i
+  forecast_h  <- min(N_window, n_remaining)
+  fc_block     <- forecast(fit_block, h = forecast_h)
+  pred_block_i <- as.numeric(fc_block$mean)
+  actual_block_i <- all_prices_NVDA[(end_i + 1):(end_i + forecast_h)]
+  rolling_results_NVDA <- add_row(
+    rolling_results_NVDA,
+    window_end_idx = end_i,
+    pred_block     = list(pred_block_i),
+    actual_block   = list(actual_block_i)
+  )
+}
+
+
+print(rolling_results_NVDA)
+
+
+rolling_long_NVDA <- rolling_results_NVDA |>
+  mutate(block_id = row_number()) |>
+  select(block_id, pred_block, actual_block) |>
+  unnest_longer(pred_block, values_to = "predicted") |>
+  unnest_longer(actual_block, values_to = "actual") |>
+  group_by(block_id) |>
+  mutate(step_in_block = row_number()) |>
+  ungroup()
+
+
+to_plot_NVDA <- rolling_long_NVDA |>
+  filter(block_id <= 2) |>
+  pivot_longer(
+    cols      = c(actual, predicted),
+    names_to  = "series",
+    values_to = "price"
+  )
+
+ggplot(to_plot_NVDA, aes(x = step_in_block, y = price, color = series)) +
+  geom_line() +
+  facet_wrap(~ block_id, nrow = 2, scales = "free_x") +
+  labs(
+    title = "Rolling 90 -> 90 ARIMA Forecast (Blocks 1 & 2)",
+    subtitle = "Each facet = one window of 90 bars -> forecast next 90 bars",
+    x        = "Minute Index (1–90 within block)",
+    y        = "NVDA Price",
+    color    = ""
+  ) +
+  theme_minimal()
+```
+
+## ARIMA model that was used for NVDA:
+
+```{r}
+
+#| echo: false
+summary(fit_90_NVDA)
+```
+
+The ARIMA(0,1,0) model is given by:
+
+$$
+y_t = y_{t-1} + \varepsilon_t
+$$
+
+## Testing predictions for LSTM model for true vs predicted values for NVDA and META, each predicting 10 time points in the future at each individual time point:
+
+Here we utilize the previously made LSTM files in the ".h5" format, and use the test sets to predict the next 10 time points for each NVDA and META. As the values in the time points increase, i.e. current time + 10, the accuracy does drop, as it is tougher to predict future time points the further in the future in comparison to time points closer to relative time. We do see stronger accuracies for the NVDA model due to the NVDA data having more time points. This is due to NVDA being traded more frequently than META and the price updating more often, allowing for more one-minute bars of testing and training data for NVDA in comparison to META. While the predictions are not perfect, they are significantly more accurate than the ARIMA model, with accuracies within the 99.9% range of the true data when looking at the next minute, i.e. current time + 1.
+
+```{python}
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
+
+def evaluate_and_plot(symbol, model_file, csv_file, window_size=90, max_horizon=10):
+    print(f"Loading model for {symbol} from '{model_file}'...")
+    model = load_model(model_file)
+    print("Model loaded.\n")
+
+    print(f"Reading test data for {symbol} from '{csv_file}'...")
+    df = pd.read_csv(csv_file, parse_dates=['timestamp'])
+    df.sort_values('timestamp', inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    if 'close' not in df.columns:
+        raise ValueError(f"CSV for {symbol} must contain a 'close' column.")
+    closes = df['close'].values.reshape(-1, 1)
+    scaler = MinMaxScaler()
+    closes_scaled = scaler.fit_transform(closes)
+    preds_scaled = {h: [] for h in range(1, max_horizon + 1)}
+    actuals_scaled = {h: [] for h in range(1, max_horizon + 1)}
+    timestamps = {h: [] for h in range(1, max_horizon + 1)}
+
+    total_points = len(closes_scaled) - window_size - max_horizon
+    if total_points <= 0:
+        raise ValueError("Not enough data points for the chosen window_size and max_horizon.")
+
+    eval_points = total_points
+    print(
+        f"Will evaluate {eval_points} sliding windows "
+        f"(out of {total_points} possible) using a {window_size}-minute input window.\n"
+    )
+
+    for i in range(eval_points):
+        input_seq = closes_scaled[i : i + window_size].copy()
+        temp_seq = input_seq.reshape(1, window_size, 1)
+
+        preds_window = []
+        for h in range(max_horizon):
+            pred_scaled = model.predict(temp_seq, verbose=0)[0][0]
+            preds_window.append(pred_scaled)
+
+            temp_seq = np.roll(temp_seq, -1, axis=1)
+            temp_seq[0, -1, 0] = pred_scaled
+
+        for h in range(1, max_horizon + 1):
+            preds_scaled[h].append(preds_window[h - 1])
+            true_index = i + window_size + h - 1
+            actuals_scaled[h].append(closes_scaled[true_index][0])
+            timestamps[h].append(df['timestamp'].iloc[true_index])
+
+    preds = {
+        h: scaler.inverse_transform(np.array(preds_scaled[h]).reshape(-1, 1)).flatten()
+        for h in preds_scaled
+    }
+    actuals = {
+        h: scaler.inverse_transform(np.array(actuals_scaled[h]).reshape(-1, 1)).flatten()
+        for h in actuals_scaled
+    }
+
+    for h in range(1, max_horizon + 1):
+        plt.figure(figsize=(10, 4))
+        plt.plot(timestamps[h], actuals[h], label='Actual', linewidth=1)
+        plt.plot(timestamps[h], preds[h], label='Predicted', linewidth=1, alpha=0.8)
+        plt.title(f"{symbol}: +{h} Minute Prediction vs Actual")
+        plt.xlabel("Timestamp")
+        plt.ylabel("close")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+
+if __name__ == "__main__":
+    symbol_configs = {
+        "META": {
+            "model_file": "META_lstm_06_03.h5",
+            "csv_file": "META_1min_0505_0604_test.csv"
+        },
+        "NVDA": {
+            "model_file": "NVDA_lstm_06_03.h5",
+            "csv_file": "NVDA_1min_0505_0604_test.csv"
+        }
+    }
+
+    missing = []
+    for sym, cfg in symbol_configs.items():
+        if not os.path.isfile(cfg["model_file"]):
+            missing.append(cfg["model_file"])
+        if not os.path.isfile(cfg["csv_file"]):
+            missing.append(cfg["csv_file"])
+    if missing:
+        print("Error: The following files are missing:")
+        for m in missing:
+            print("  -", m)
+        print("\nPlease place them in the same directory as this script (or adjust the paths).")
+        exit(1)
+
+    for symbol, cfg in symbol_configs.items():
+        evaluate_and_plot(
+            symbol=symbol,
+            model_file=cfg["model_file"],
+            csv_file=cfg["csv_file"],
+            window_size=90,
+            max_horizon=10
+        )
+```
+
+## DQN trading algorithm for NVDA, META, using auto.arima and LSTM models:
+
+Now we get to the point of being able to test the different prediction models and their applications to a simulated trading experience. We will use a DQN model that uses the following mathematical concepts:
+
+The Bellman equation:
+
+$$
+Q^*(s,a) = \mathbb{E}\bigl[r + \gamma \max_{a'} Q^*(s',a') \mid s,a\bigr]
+$$
+
+Q-network function approximator:
+
+$$
+Q(s,a;\theta) \approx Q^*(s,a)
+$$
+
+TD-error squared loss:
+
+$$
+L(\theta) = \mathbb{E}_{(s,a,r,s')\sim\mathcal{D}}\Bigl[\bigl(r + \gamma \max_{a'} Q(s',a';\theta^-) - Q(s,a;\theta)\bigr)^{2}\Bigr]
+$$
+
+Gradient-descent update:
+
+$$
+\theta \;\leftarrow\; \theta \;-\;\alpha\,\nabla_{\theta}L(\theta)
+$$
+
+Between these mathematical concepts of the DQN model, the model will update trading behavior dependent on "r" which is the reward function within the model. Such that is updated in our code as "current portfolio - previous portfolio", taking the differences between the two equity amounts at time t, will allow the DQN model to learn what a positive and negative reward is like. Therefore, if the reward is expected to be negative then the model will learn to not make that trade, and if the expected reward is positive then the model will make that trade. We allow the model to start with a \$100,000 starting fund, and each trade is traded in quantities of 5 shares per trade. The equity is updated at each step and the model will not make trades if there is no cash in the account, which does not happen as each trade is cleared before the next trade is made. Throughout the trading period, using the test data, when we plot the equity curves, we can observe that no trades are made for the ARIMA model. This is due to the ARIMA model holding that constant horizontal prediction value around the average value of the training data. While the LSTM model can dynamically adjust to the price fluctuations, we see that trades are made and the model makes profitable trades dependent on the LSTM model's predictions.
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from keras.models import load_model  
+
+nvda_train = pd.read_csv("NVDA_1min_90days_0105_0505.csv", parse_dates=['timestamp'])
+meta_train = pd.read_csv("META_1min_90days_0105_0505.csv", parse_dates=['timestamp'])
+
+nvda_train.sort_values('timestamp', inplace=True)
+meta_train.sort_values('timestamp', inplace=True)
+
+nvda_close_train = nvda_train['close'].values
+meta_close_train = meta_train['close'].values
+
+nvda_min, nvda_max = nvda_close_train.min(), nvda_close_train.max()
+meta_min, meta_max = meta_close_train.min(), meta_close_train.max()
+
+nvda_model = load_model("NVDA_lstm_06_03.h5")
+meta_model = load_model("META_lstm_06_03.h5")
+
+nvda_test = pd.read_csv("NVDA_1min_0505_0604_test.csv", parse_dates=['timestamp'])
+meta_test = pd.read_csv("META_1min_0505_0604_test.csv", parse_dates=['timestamp'])
+
+nvda_test.sort_values('timestamp', inplace=True)
+meta_test.sort_values('timestamp', inplace=True)
+
+test_data = pd.merge(
+    nvda_test[['timestamp', 'close']], 
+    meta_test[['timestamp', 'close']], 
+    on='timestamp', 
+    suffixes=('_nvda', '_meta')
+)
+
+nvda_close = test_data['close_nvda'].values
+meta_close = test_data['close_meta'].values
+
+def create_sequences(arr, window):
+    seqs = []
+    for i in range(window, len(arr)):
+        seqs.append(arr[i-window:i])
+    return np.array(seqs)
+
+window_size = 90
+
+nvda_scaled = (nvda_close - nvda_min) / (nvda_max - nvda_min)
+meta_scaled = (meta_close - meta_min) / (meta_max - meta_min)
+
+nvda_seqs = create_sequences(nvda_scaled, window_size)
+meta_seqs = create_sequences(meta_scaled, window_size)
+
+nvda_seqs = nvda_seqs.reshape((nvda_seqs.shape[0], nvda_seqs.shape[1], 1))
+meta_seqs = meta_seqs.reshape((meta_seqs.shape[0], meta_seqs.shape[1], 1))
+
+nvda_pred_scaled = nvda_model.predict(nvda_seqs)
+nvda_pred = (nvda_pred_scaled.flatten() * (nvda_max - nvda_min)) + nvda_min
+
+meta_pred_scaled = meta_model.predict(meta_seqs)
+meta_pred = (meta_pred_scaled.flatten() * (meta_max - meta_min)) + meta_min
+
+nvda_pred_full = np.empty(len(nvda_close))
+nvda_pred_full[:window_size] = np.nan
+nvda_pred_full[window_size:] = nvda_pred
+
+meta_pred_full = np.empty(len(meta_close))
+meta_pred_full[:window_size] = np.nan
+meta_pred_full[window_size:] = meta_pred
+
+nvda_arima_pred_full = np.empty(len(nvda_close))
+meta_arima_pred_full = np.empty(len(meta_close))
+
+nvda_arima_pred_full[0] = nvda_close_train[-1]
+meta_arima_pred_full[0] = meta_close_train[-1]
+
+for i in range(1, len(nvda_close)):
+    nvda_arima_pred_full[i] = nvda_close[i-1]
+    meta_arima_pred_full[i] = meta_close[i-1]
+
+start_cash = 100_000
+qty_per_trade = 5
+
+def total_abs_position_val(pos_nvda, pos_meta, price_nvda, price_meta):
+    return abs(pos_nvda) * price_nvda + abs(pos_meta) * price_meta
+
+
+cash_lstm = start_cash
+cash_arima = start_cash
+pos_lstm_nvda = 0
+pos_lstm_meta = 0
+pos_arima_nvda = 0
+pos_arima_meta = 0
+
+equity_lstm = []
+equity_arima = []
+timestamps = test_data['timestamp'].values
+
+for i in range(window_size, len(test_data)):
+    price_nvda = nvda_close[i]
+    price_meta = meta_close[i]
+
+    prev_nvda = nvda_close[i-1]
+    prev_meta = meta_close[i-1]
+    
+    pred_nvda_lstm = nvda_pred_full[i]
+    pred_meta_lstm = meta_pred_full[i]
+    sig_nvda_lstm = 1 if pred_nvda_lstm - prev_nvda > 0 else (-1 if pred_nvda_lstm - prev_nvda < 0 else 0)
+    sig_meta_lstm = 1 if pred_meta_lstm - prev_meta > 0 else (-1 if pred_meta_lstm - prev_meta < 0 else 0)
+    
+    pred_nvda_arima = nvda_arima_pred_full[i]
+    pred_meta_arima = meta_arima_pred_full[i]
+    sig_nvda_arima = 1 if pred_nvda_arima - prev_nvda > 0 else (-1 if pred_nvda_arima - prev_nvda < 0 else 0)
+    sig_meta_arima = 1 if pred_meta_arima - prev_meta > 0 else (-1 if pred_meta_arima - prev_meta < 0 else 0)
+    
+    # Execute trades for LSTM strategy 
+    if sig_nvda_lstm == 1:
+        if pos_lstm_nvda < 0:
+            cash_lstm -= abs(pos_lstm_nvda) * price_nvda
+            pos_lstm_nvda = 0
+        if total_abs_position_val(pos_lstm_nvda, pos_lstm_meta, price_nvda, price_meta) + qty_per_trade * price_nvda <= start_cash:
+            cash_lstm -= qty_per_trade * price_nvda
+            pos_lstm_nvda += qty_per_trade
+    elif sig_nvda_lstm == -1:
+        if pos_lstm_nvda > 0:
+            cash_lstm += pos_lstm_nvda * price_nvda
+            pos_lstm_nvda = 0
+        if total_abs_position_val(pos_lstm_nvda - qty_per_trade, pos_lstm_meta, price_nvda, price_meta) <= start_cash:
+            cash_lstm += qty_per_trade * price_nvda
+            pos_lstm_nvda -= qty_per_trade
+    
+    if sig_meta_lstm == 1:
+        if pos_lstm_meta < 0:
+            cash_lstm -= abs(pos_lstm_meta) * price_meta
+            pos_lstm_meta = 0
+        if total_abs_position_val(pos_lstm_nvda, pos_lstm_meta, price_nvda, price_meta) + qty_per_trade * price_meta <= start_cash:
+            cash_lstm -= qty_per_trade * price_meta
+            pos_lstm_meta += qty_per_trade
+    elif sig_meta_lstm == -1:
+        if pos_lstm_meta > 0:
+            cash_lstm += pos_lstm_meta * price_meta
+            pos_lstm_meta = 0
+        if total_abs_position_val(pos_lstm_nvda, pos_lstm_meta - qty_per_trade, price_nvda, price_meta) <= start_cash:
+            cash_lstm += qty_per_trade * price_meta
+            pos_lstm_meta -= qty_per_trade
+    
+    # Compute LSTM portfolio equity
+    equity_val_lstm = cash_lstm + pos_lstm_nvda * price_nvda + pos_lstm_meta * price_meta
+    equity_lstm.append(equity_val_lstm)
+    
+    # Execute trades for ARIMA strategy 
+    if sig_nvda_arima == 1:
+        if pos_arima_nvda < 0:
+            cash_arima -= abs(pos_arima_nvda) * price_nvda
+            pos_arima_nvda = 0
+        if total_abs_position_val(pos_arima_nvda, pos_arima_meta, price_nvda, price_meta) + qty_per_trade * price_nvda <= start_cash:
+            cash_arima -= qty_per_trade * price_nvda
+            pos_arima_nvda += qty_per_trade
+    elif sig_nvda_arima == -1:
+        if pos_arima_nvda > 0:
+            cash_arima += pos_arima_nvda * price_nvda
+            pos_arima_nvda = 0
+        if total_abs_position_val(pos_arima_nvda - qty_per_trade, pos_arima_meta, price_nvda, price_meta) <= start_cash:
+            cash_arima += qty_per_trade * price_nvda
+            pos_arima_nvda -= qty_per_trade
+    
+    if sig_meta_arima == 1:
+        if pos_arima_meta < 0:
+            cash_arima -= abs(pos_arima_meta) * price_meta
+            pos_arima_meta = 0
+        if total_abs_position_val(pos_arima_nvda, pos_arima_meta, price_nvda, price_meta) + qty_per_trade * price_meta <= start_cash:
+            cash_arima -= qty_per_trade * price_meta
+            pos_arima_meta += qty_per_trade
+    elif sig_meta_arima == -1:
+        if pos_arima_meta > 0:
+            cash_arima += pos_arima_meta * price_meta
+            pos_arima_meta = 0
+        if total_abs_position_val(pos_arima_nvda, pos_arima_meta - qty_per_trade, price_nvda, price_meta) <= start_cash:
+            cash_arima += qty_per_trade * price_meta
+            pos_arima_meta -= qty_per_trade
+    
+    equity_val_arima = cash_arima + pos_arima_nvda * price_nvda + pos_arima_meta * price_meta
+    equity_arima.append(equity_val_arima)
+
+equity_df = pd.DataFrame({
+    'timestamp': timestamps[window_size:],
+    'equity_lstm': equity_lstm,
+    'equity_arima': equity_arima
+})
+
+plt.figure()
+plt.plot(equity_df['timestamp'], equity_df['equity_lstm'], label='LSTM Strategy')
+plt.plot(equity_df['timestamp'], equity_df['equity_arima'], label='ARIMA Strategy')
+plt.legend()
+plt.title('Equity Curve Comparison')
+plt.xlabel('Timestamp')
+plt.ylabel('Equity ($)')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+```
+
+## Conclusion:
+
+In conclusion, we can come to the consensus that the ARIMA model was not a beneficial model for these trading parameters. Whether the model could be optimized or not, we believe that the ARIMA model will not be able to adjust to the short term predictions to the same degree of accuracy as the LSTM model. While the ARIMA model has its drawbacks in this case, as we want to be able to predict short intervals with high accuracy, the LSTM model has these drawbacks in long term accuracies. Whereas the further out an LSTM model is used to predict data the less accurate it is, since seasonality does not come into account in an LSTM model, an ARIMA model can be extremely beneficial for predicting seasonality based data such as we covered in class. However, as mentioned, in this case the LSTM model is significantly stronger for short term predictions with high accuracies. Therefore, allowing the LSTM model to be the dominant price prediction model in our tests between ARIMA and LSTM for the minute-bar level data for NVDA and META.
